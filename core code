@@ -1,0 +1,221 @@
+class weightFrame():
+'''
+calculate the weights of features
+'''
+    def __init__(self,fea_num,max_label,train_data):
+        self.fea_num = fea_num
+        self.mLabel = max_label +1
+        self.train_data = train_data
+    
+    def getP(self,m_data):
+        #对列求和组成新的一行
+        df_p = m_data.copy()
+        sumL = []
+        for i in range(m_data.shape[1]-1):
+            s = m_data.iloc[:,i].sum()
+            sumL.append(s)
+        #求p矩阵
+        for i in range(m_data.shape[1]-1):
+            for j in range(m_data.shape[0]):
+                df_p.iloc[j,i] = df_p.iloc[j,i]/sumL[i]
+        return df_p
+
+    def getW(self,dfp):
+        '''
+        参数：dfp - p矩阵
+        '''
+        m = dfp.shape[0]
+        dList = []
+        for j in range(dfp.shape[1]-1):
+            sigma = 0
+            for i in range(m):
+                
+                multi = dfp.iloc[i,j] * math.log(dfp.iloc[i,j])
+                sigma += multi
+            E_j = (-1/math.log(m)) * sigma
+            d_j = 1 - E_j
+            dList.append(d_j)
+        dSum = sum(dList)
+        wList = []
+        for each in dList:
+            #保留四位小数
+            w_j = round(each/dSum,4)
+            wList.append(w_j)
+        return wList
+
+    def get_wFrame(self):
+        wFrame = pd.DataFrame(np.arange(self.fea_num*self.mLabel).reshape((self.fea_num,self.mLabel)))
+        for i in range(self.mLabel):
+            m_data = self.train_data[self.train_data.iloc[:,-1]==i]
+            dfp = self.getP(m_data)
+            wList = pd.Series(self.getW(dfp))
+            wFrame.iloc[:,i] = wList
+        return wFrame.T
+
+class trainWENN:
+    '''
+    kPre - k*
+    kLabel - p
+    '''
+    def __init__(self,X,fea_num,max_label,learn_rate,wFrame):
+        self.X = X
+        self.fea_num = fea_num
+        self.max_label = max_label
+        self.mLabel = max_label + 1
+        self.learn_rate = learn_rate
+        self.wFrame = wFrame
+    
+    def get_boundFrame(self):
+        boundFrame = pd.DataFrame(np.arange(self.fea_num*self.mLabel).reshape((self.fea_num,self.mLabel)))
+        for i in range(self.mLabel):
+            m_data = self.X[self.X.iloc[:,-1]==i]
+            m_max = list(m_data.max(axis = 0))
+            m_min = list(m_data.min(axis = 0))
+            R = pd.Series(list(zip(m_min,m_max))[:-1])
+            boundFrame.iloc[:,i] = R
+        boundFrame = boundFrame.T
+        boundFrame = boundFrame.applymap(lambda x:list(x))
+        return boundFrame
+    
+    def get_zFrame(self,boundFrame):
+        zFrame = boundFrame.applymap(lambda x:(x[0]+x[1])/2)
+        return zFrame
+    
+    def calc_ed(self,x,a,b):
+        '''
+        参数：x - data.iloc[i,j]
+              a - 下界
+              b - 上界
+        '''
+        ed = abs(x - (a+b)/2) - (b-a)/2
+        return ed
+
+    def calc_Kx(self,x,boundFrame):
+        KxList = []
+        for k in range(self.mLabel):
+            Kx = 0
+            for j in range(self.fea_num):
+                a = boundFrame.iloc[k,j][0]
+                b = boundFrame.iloc[k,j][1]
+                ed = self.calc_ed(x[j],a,b)
+                if a<=x[j]<=b:
+                    kx = -2*ed / abs(b-a)
+                    Kx += self.wFrame.iloc[k,j] * kx
+                else:
+                    kLabel = int(x[-1])
+                    ap = boundFrame.iloc[kLabel,j][0]
+                    bp = boundFrame.iloc[kLabel,j][1]
+                    edp = self.calc_ed(x[j],ap,bp)
+                    kx = ed/(edp - ed)
+                    Kx += self.wFrame.iloc[k,j] * kx
+            KxList.append(Kx)
+            #KxList中包含5个元素
+        return KxList
+  
+    def get_kPre(self,KxList):
+        kPre = np.argmax(KxList)
+        return kPre
+
+    def update_bound(self,x,boundFrame,zFrame,kLabel,kPre):
+        for j in range(self.fea_num):
+            boundFrame.iloc[kLabel,j][0] += self.learn_rate*(x[j]-zFrame.iloc[kLabel,j])
+            boundFrame.iloc[kLabel,j][1] += self.learn_rate*(x[j]-zFrame.iloc[kLabel,j]) 
+            boundFrame.iloc[kPre,j][0] -= self.learn_rate*(x[j]-zFrame.iloc[kPre,j])
+            boundFrame.iloc[kPre,j][1] -= self.learn_rate*(x[j]-zFrame.iloc[kPre,j])
+        return boundFrame
+
+    def update_z(self,x,zFrame,kLabel,kPre):
+        for j in range(self.fea_num):
+            zFrame.iloc[kLabel,j] += self.learn_rate*(x[j]-zFrame.iloc[kLabel,j])
+            zFrame.iloc[kPre,j] -= self.learn_rate*(x[j]-zFrame.iloc[kPre,j])        
+        return zFrame
+    
+    def fit(self,errorMax=0.001):
+        start = time.clock()
+        boundFrame = self.get_boundFrame()
+        zFrame = self.get_zFrame(boundFrame)
+        epochs = 0
+        errorRate = 1
+        while errorRate>errorMax and epochs<50: 
+            epochs +=1
+            errorNum = 0
+            m = len(self.X)
+            for i in range(0,m):
+                x = self.X.iloc[i,:]
+                KxList = self.calc_Kx(x,boundFrame)
+                kPre = self.get_kPre(KxList)
+                kLabel = int(x[-1]) 
+                if kLabel != kPre:
+                    errorNum += 1
+                    boundFrame = self.update_bound(x,boundFrame,zFrame,kLabel,kPre)
+                    zFrame = self.update_z(x,zFrame,kLabel,kPre)
+            errorRate = errorNum/m
+        end = time.clock()
+        T = float(end - start)
+        return boundFrame,zFrame,epochs,T
+
+class testWENN:
+    '''
+    X - test data
+    boundFrame,zFrame - 更新后的
+    '''
+    def __init__(self,X,boundFrame,zFrame,wFrame,fea_num,max_label):
+        self.X = X
+        self.boundFrame = boundFrame
+        self.zFrame = zFrame
+        self.wFrame = wFrame
+        self.fea_num = fea_num
+        self.max_label = max_label
+        self.mLabel = max_label + 1
+    
+    def calc_ed(self,x,a,b):
+        '''
+        参数：x - data.iloc[i,j]
+              a - 下界
+              b - 上界
+        '''
+        ed = abs(x - (a+b)/2) - (b-a)/2
+        return ed
+
+    def calc_Kx(self,x):
+        KxList = []
+        for k in range(self.mLabel):
+            Kx = 0
+            for j in range(self.fea_num):
+                a = self.boundFrame.iloc[k,j][0]
+                b = self.boundFrame.iloc[k,j][1]
+                ed = self.calc_ed(x[j],a,b)
+                if a<=x[j]<=b:
+                    kx = -2*ed / abs(b-a)
+                    Kx += self.wFrame.iloc[k,j] * kx
+                else:
+                    kLabel = int(x[-1])
+                    ap = self.boundFrame.iloc[kLabel,j][0]
+                    bp = self.boundFrame.iloc[kLabel,j][1]
+                    edp = self.calc_ed(x[j],ap,bp)
+                    kx = ed/(edp - ed)
+                    Kx += self.wFrame.iloc[k,j] * kx
+            KxList.append(Kx)
+            #KxList中包含5个元素
+        return KxList
+  
+    def get_kPre(self,KxList):
+        kPre = np.argmax(KxList)
+        return kPre
+    
+    def test(self):
+        start = time.clock()
+        m = len(self.X)
+        count = 0
+        for i in range(m):
+            x = self.X.iloc[i,:]
+            KxList = self.calc_Kx(x)
+            kPre = self.get_kPre(KxList)
+            if kPre == int(x[-1]):
+                count +=1
+        end = time.clock()
+        T = float(end - start)
+        return count/m,T
+    
+
+    
